@@ -3,30 +3,83 @@
 import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import clsx from 'clsx';
-import { listCategories, listProducts } from '@/lib/db';
+import { listAllSnapshots, listCategories, listProducts } from '@/lib/db';
 import { useIsClient, useLive } from '@/lib/use-live';
-import { buildCompareRows, buildOverview } from '@/lib/compare';
-import { resolveCategoryId } from '@/lib/classify';
+import { buildCompareMatrix, buildCompareRows, buildOverview } from '@/lib/compare';
+import { CompareMatrixView } from '@/components/CompareMatrix';
 import { CompareRowCard } from '@/components/CompareRowCard';
 import { AddProductSheet } from '@/components/AddProductSheet';
 import { EmptyState, Stat } from '@/components/ui';
+
+type ViewMode = 'matrix' | 'card';
 
 export default function DashboardPage() {
   const router = useRouter();
   const isClient = useIsClient();
   const products = useLive(() => listProducts(), [], []);
   const categories = useLive(() => listCategories(), [], []);
+  const snapshots = useLive(() => listAllSnapshots(), [], []);
 
+  const [view, setView] = useState<ViewMode>('matrix');
   const [minShops, setMinShops] = useState(1);
+  const [onlyChanged, setOnlyChanged] = useState(false);
   const [catFilter, setCatFilter] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [addOpen, setAddOpen] = useState(false);
 
   const allRows = useMemo(() => buildCompareRows(products, categories), [products, categories]);
-  const overview = useMemo(() => buildOverview(products, categories, allRows), [products, categories, allRows]);
+  const overview = useMemo(
+    () => buildOverview(products, categories, allRows),
+    [products, categories, allRows]
+  );
 
   const colorMap = useMemo(() => new Map(categories.map((c) => [c.id, c.color])), [categories]);
 
+  /* ── 矩阵：列固定为店铺，行按分类分组 ── */
+  const matrix = useMemo(
+    () => buildCompareMatrix(products, categories, snapshots, { minShops, onlyChanged }),
+    [products, categories, snapshots, minShops, onlyChanged]
+  );
+
+  /** 行级二次筛选（分类 + 关键词）—— 只减行，不动列，避免横向位置跳动 */
+  const filteredMatrix = useMemo(() => {
+    const keyword = q.trim().toLowerCase();
+    const shopNames = matrix.shops.map((s) => s.name);
+
+    const groups = matrix.groups
+      .filter((g) => {
+        if (!catFilter) return true;
+        return catFilter === '__none__' ? g.categoryId === null : g.categoryId === catFilter;
+      })
+      .map((g) => ({
+        ...g,
+        rows: g.rows.filter((r) => {
+          if (!keyword) return true;
+          const hay = [
+            r.specLabel,
+            r.specKey,
+            g.categoryName,
+            ...shopNames,
+            ...r.cells.map((c) => c?.skuSpecText ?? ''),
+          ]
+            .join(' ')
+            .toLowerCase();
+          return hay.includes(keyword);
+        }),
+      }))
+      .filter((g) => g.rows.length > 0);
+
+    let rowCount = 0;
+    let changedRowCount = 0;
+    for (const g of groups) {
+      rowCount += g.rows.length;
+      changedRowCount += g.rows.filter((r) => r.changedCount > 0).length;
+    }
+
+    return { ...matrix, groups, rowCount, changedRowCount };
+  }, [matrix, catFilter, q]);
+
+  /* ── 卡片视图的行筛选 ── */
   const rows = useMemo(() => {
     const keyword = q.trim().toLowerCase();
     return allRows.filter((r) => {
@@ -44,6 +97,8 @@ export default function DashboardPage() {
     });
   }, [allRows, minShops, catFilter, q]);
 
+  const rowCount = view === 'matrix' ? filteredMatrix.rowCount : rows.length;
+
   if (!isClient) {
     return (
       <div className="space-y-3">
@@ -60,7 +115,7 @@ export default function DashboardPage() {
         <EmptyState
           icon="🛒"
           title="还没有竞品数据"
-          description="粘贴淘宝商品链接，自动提取全部 SKU 价格，并按规格把各店铺横向拉平对比。"
+          description="粘贴淘宝商品链接，自动提取全部 SKU 价格，再按规格把各店铺横向拉平对比。"
           action={
             <button type="button" className="btn-primary" onClick={() => setAddOpen(true)}>
               添加第一个链接
@@ -74,12 +129,11 @@ export default function DashboardPage() {
               <span className="font-medium text-ink-800">1. 添加链接</span> — 粘贴淘宝/天猫商品链接，一行一个。
             </li>
             <li>
-              <span className="font-medium text-ink-800">2. 抓取价格</span> — 线上抓取失败时，用本地脚本{' '}
-              <code className="rounded bg-ink-100 px-1 font-mono text-[10px]">npm run scrape</code>{' '}
-              抓取后到「数据」页导入。
+              <span className="font-medium text-ink-800">2. 抓取价格</span> — 在「数据」页启动本地抓取代理，
+              应用内直接抓；也可用脚本抓取后导入。
             </li>
             <li>
-              <span className="font-medium text-ink-800">3. 自动分类 + 对比</span> — 系统按规格键把同款拉平，价差一目了然。
+              <span className="font-medium text-ink-800">3. 对比表</span> — 每个店铺一列，同规格横向对齐，价差与涨跌一眼看清。
             </li>
           </ol>
         </div>
@@ -90,8 +144,8 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-3">
-      {/* 概览 */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {/* 概览：窄屏一行四项，宽屏放大 */}
+      <div className="grid grid-cols-4 gap-1.5 sm:gap-2">
         <Stat label="竞品商品" value={overview.productCount} hint={`${overview.shopCount} 家店铺`} />
         <Stat label="SKU 总数" value={overview.skuCount} />
         <Stat
@@ -136,7 +190,14 @@ export default function DashboardPage() {
             className="btn-primary shrink-0 px-3"
             aria-label="添加链接"
           >
-            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round">
+            <svg
+              viewBox="0 0 24 24"
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2.4}
+              strokeLinecap="round"
+            >
               <path d="M12 5v14M5 12h14" />
             </svg>
             添加
@@ -157,21 +218,45 @@ export default function DashboardPage() {
           </FilterChip>
         </div>
 
-        <div className="mt-2.5 flex items-center justify-between border-t border-ink-100 pt-2.5">
-          <div className="flex gap-1.5">
-            <FilterChip active={minShops === 1} onClick={() => setMinShops(1)} small>
-              全部规格
-            </FilterChip>
-            <FilterChip active={minShops === 2} onClick={() => setMinShops(2)} small>
-              仅可跨店对比
-            </FilterChip>
-          </div>
-          <span className="text-[11px] text-ink-400">{rows.length} 行</span>
+        <div className="mt-2.5 flex flex-wrap gap-1.5 border-t border-ink-100 pt-2.5">
+          <FilterChip active={minShops === 1} onClick={() => setMinShops(1)} small>
+            全部规格
+          </FilterChip>
+          <FilterChip active={minShops === 2} onClick={() => setMinShops(2)} small>
+            仅可跨店对比
+          </FilterChip>
+          <FilterChip active={onlyChanged} onClick={() => setOnlyChanged((v) => !v)} small tone="warn">
+            仅看变动
+          </FilterChip>
+        </div>
+
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <span className="text-[11px] tabular-nums text-ink-400">{rowCount} 行</span>
+          <ViewToggle view={view} onChange={setView} />
         </div>
       </div>
 
-      {/* 对比列表 */}
-      {rows.length === 0 ? (
+      {/* 对比区 */}
+      {view === 'matrix' ? (
+        filteredMatrix.groups.length === 0 ? (
+          <EmptyState
+            icon="🔍"
+            title="没有符合条件的规格"
+            description={
+              onlyChanged
+                ? '还没有检测到价格变动。刷新一次价格后，涨跌会自动标出来。'
+                : minShops === 2
+                  ? '切换到「全部规格」看看，或给更多店铺添加同款商品。'
+                  : '试着换个关键词，或调整分类筛选。'
+            }
+          />
+        ) : (
+          <CompareMatrixView
+            matrix={filteredMatrix}
+            onOpenProduct={(id) => router.push(`/products?focus=${id}`)}
+          />
+        )
+      ) : rows.length === 0 ? (
         <EmptyState
           icon="🔍"
           title="没有符合条件的规格"
@@ -199,18 +284,67 @@ export default function DashboardPage() {
   );
 }
 
+/* ───────────────────────────── 子组件 ───────────────────────────── */
+
+function ViewToggle({ view, onChange }: { view: ViewMode; onChange: (v: ViewMode) => void }) {
+  const options: Array<{ key: ViewMode; label: string; icon: React.ReactNode }> = [
+    {
+      key: 'matrix',
+      label: '对比表',
+      icon: (
+        <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M3 9h18M9 9v11" />
+        </svg>
+      ),
+    },
+    {
+      key: 'card',
+      label: '卡片',
+      icon: (
+        <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+          <rect x="3" y="4" width="18" height="6" rx="2" />
+          <rect x="3" y="14" width="18" height="6" rx="2" />
+        </svg>
+      ),
+    },
+  ];
+
+  return (
+    <div className="flex rounded-lg bg-ink-100 p-0.5">
+      {options.map((o) => (
+        <button
+          key={o.key}
+          type="button"
+          onClick={() => onChange(o.key)}
+          aria-pressed={view === o.key}
+          className={clsx(
+            'flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition',
+            view === o.key ? 'bg-white text-ink-900 shadow-sm' : 'text-ink-500 hover:text-ink-700'
+          )}
+        >
+          {o.icon}
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function FilterChip({
   children,
   active,
   color,
   onClick,
   small,
+  tone = 'default',
 }: {
   children: React.ReactNode;
   active: boolean;
   color?: string;
   onClick: () => void;
   small?: boolean;
+  tone?: 'default' | 'warn';
 }) {
   return (
     <button
@@ -220,7 +354,9 @@ function FilterChip({
         'shrink-0 rounded-full border font-medium transition',
         small ? 'px-2.5 py-1 text-[11px]' : 'px-3 py-1.5 text-xs',
         active
-          ? 'border-transparent bg-ink-900 text-white'
+          ? tone === 'warn'
+            ? 'border-transparent bg-up text-white'
+            : 'border-transparent bg-ink-900 text-white'
           : 'border-ink-200 bg-white text-ink-600 hover:border-ink-300'
       )}
       style={active && color ? { backgroundColor: color } : undefined}

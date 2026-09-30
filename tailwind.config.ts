@@ -32,6 +32,8 @@ const config: Config = {
         // 中国股市惯例：涨红跌绿
         up: '#e5484d',
         down: '#2f9e44',
+        // 中间档警示（价差偏大但未到刺眼程度）
+        warn: '#f5a524',
       },
       boxShadow: {
         glass: '0 8px 32px rgba(31, 37, 48, 0.08)',

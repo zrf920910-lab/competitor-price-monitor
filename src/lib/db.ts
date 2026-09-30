@@ -140,7 +140,9 @@ export async function upsertProduct(input: UpsertProductInput): Promise<ProductR
     cover: input.cover ?? existing?.cover,
     manualCategoryId: existing?.manualCategoryId ?? null,
     autoCategoryId: existing?.autoCategoryId ?? null,
-    skus,
+    // SKU 的 updatedAt 统一成 now —— 必须与下面快照的 ts 相同，
+    // 否则本次快照会被当成「上一条」，涨跌判定会漏掉真实的变动。
+    skus: skus.map((s) => ({ ...s, updatedAt: now })),
     status: skus.length > 0 ? 'ok' : 'idle',
     error: undefined,
     lastSyncAt: skus.length > 0 ? now : existing?.lastSyncAt,
@@ -468,12 +470,44 @@ export async function importBundle(bundle: ImportBundle, options: ImportOptions 
         stat.skipped += 1;
         continue;
       }
+
+      // 统一时间戳：SKU 的 updatedAt 必须与快照 ts 一致，
+      // 否则「当前快照」会被当成上一条，涨跌判定全乱。
+      const ts = Date.now();
+      const incoming = (p.skus ?? []).map((s) => ({ ...s, updatedAt: ts }));
+
+      // 本次没带的 SKU 保留 —— 部分导入（如只更新一个规格）不应清空其余规格
+      let skus = incoming;
+      if (existing?.skus?.length) {
+        const seen = new Set(incoming.map((s) => s.id));
+        skus = [...incoming, ...existing.skus.filter((s) => !seen.has(s.id))];
+      }
+
       await db.products.put({
         ...p,
         id: existing?.id ?? p.id,
         manualCategoryId: existing?.manualCategoryId ?? p.manualCategoryId ?? null,
         autoCategoryId: existing?.autoCategoryId ?? p.autoCategoryId ?? null,
+        skus,
+        updatedAt: ts,
       });
+
+      // 记录价格快照 —— 与 upsertProduct 保持一致，价格历史才接得上
+      if (skus.length) {
+        await db.snapshots.bulkPut(
+          skus
+            .filter((s) => s.price > 0)
+            .map((s) => ({
+              id: `${existing?.id ?? p.id}:${s.id}:${ts}`,
+              productId: existing?.id ?? p.id,
+              skuId: s.id,
+              specKey: s.manualSpecKey || s.specKey,
+              price: s.price,
+              ts,
+            }))
+        );
+      }
+
       stat.products += 1;
     }
   }

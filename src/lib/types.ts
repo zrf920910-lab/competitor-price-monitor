@@ -138,6 +138,88 @@ export interface CompareRow {
   shopCount: number;
 }
 
+/* ---------------- 矩阵对比视图（汽车参数表式） ---------------- */
+
+/** 单元格价格变动（相对上一次快照） */
+export interface CellDelta {
+  /** 上一次价格 */
+  prev: number;
+  /** 变动额：正 = 涨价，负 = 降价 */
+  diff: number;
+  /** 变动率 */
+  rate: number;
+  /** 上一次采集时间 */
+  ts: number;
+}
+
+/** 矩阵单元格：某个店铺在某个规格上的报价 */
+export interface MatrixCell {
+  productId: string;
+  productTitle: string;
+  skuId: string;
+  skuSpecText: string;
+  price: number;
+  originalPrice?: number;
+  stock?: number;
+  sold?: number;
+  url: string;
+  updatedAt: number;
+  /** 有变动时才有 */
+  delta?: CellDelta;
+}
+
+/** 矩阵行：一个规格 */
+export interface MatrixRow {
+  id: string;
+  specKey: string;
+  specLabel: string;
+  /** 与 shops 等长，索引一一对应；null = 该店没有这个规格 */
+  cells: Array<MatrixCell | null>;
+  minPrice: number;
+  maxPrice: number;
+  avgPrice: number;
+  spread: number;
+  spreadRate: number;
+  /** 有几家店铺报了价 */
+  shopCount: number;
+  /** 该行有几家店铺价格发生了变动 */
+  changedCount: number;
+}
+
+/** 矩阵分组：一个分类 */
+export interface MatrixGroup {
+  categoryId: string | null;
+  categoryName: string;
+  categoryColor?: string;
+  rows: MatrixRow[];
+}
+
+/** 店铺列元信息 */
+export interface MatrixShop {
+  key: string;
+  name: string;
+  /** 参与对比的商品数 */
+  productCount: number;
+  /** 报价的规格数 */
+  quoteCount: number;
+  /** 拿下最低价的次数（仅统计可跨店对比的行） */
+  bestCount: number;
+  /** 最低价命中率 */
+  bestRate: number;
+  /** 该店价格发生变动的次数 */
+  changeCount: number;
+}
+
+export interface CompareMatrix {
+  shops: MatrixShop[];
+  groups: MatrixGroup[];
+  rowCount: number;
+  /** 有价格变动的行数 */
+  changedRowCount: number;
+  /** 最近一次价格变动时间 */
+  lastChangeAt?: number;
+}
+
 /** 抓取结果（脚本 / API 共用） */
 export interface ScrapeResult {
   itemId: string;

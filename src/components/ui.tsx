@@ -158,11 +158,11 @@ export function Stat({
   tone?: 'default' | 'brand' | 'warn';
 }) {
   return (
-    <div className="card px-3 py-2.5">
-      <p className="text-[11px] font-medium text-ink-400">{label}</p>
+    <div className="card px-2 py-2 sm:px-3 sm:py-2.5">
+      <p className="truncate text-[10px] font-medium text-ink-400 sm:text-[11px]">{label}</p>
       <p
         className={clsx(
-          'mt-0.5 text-xl font-semibold tabular-nums tracking-tight',
+          'mt-0.5 text-lg font-semibold tabular-nums tracking-tight sm:text-xl',
           tone === 'brand' && 'text-brand-600',
           tone === 'warn' && 'text-up',
           tone === 'default' && 'text-ink-900'
@@ -170,7 +170,8 @@ export function Stat({
       >
         {value}
       </p>
-      {hint ? <p className="mt-0.5 text-[10px] text-ink-400">{hint}</p> : null}
+      {/* 窄屏省掉 hint —— 给下面的对比表多留一行高度 */}
+      {hint ? <p className="mt-0.5 hidden truncate text-[10px] text-ink-400 sm:block">{hint}</p> : null}
     </div>
   );
 }

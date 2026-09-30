@@ -5,6 +5,44 @@ import { buildShopKey, buildSpecKey, buildSpecLabel, extractItemId, normalizeTex
 
 /* ---------------- CSV ---------------- */
 
+/**
+ * 32 位字符串哈希（base36）。
+ * 用来把「内容」映射成稳定 id —— 同一份内容每次导入都必须得到同一个 id，
+ * 否则价格历史会断裂，涨跌也就无从计算。
+ */
+function hash36(input: string): string {
+  const s = normalizeText(input);
+  let h = 0;
+  for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(36);
+}
+
+/**
+ * 由分组键派生商品 id。
+ *
+ * 不能带 `grouped.size` 之类的序号：同一批数据换个行序，
+ * 序号就变了，id 跟着变，历史全部接不上。
+ */
+function stableProductId(groupKey: string): string {
+  const slug = groupKey.replace(/[^\w\u4e00-\u9fa5]/g, '').slice(0, 32);
+  return `imp-${slug}-${hash36(groupKey)}`;
+}
+
+/**
+ * 由规格文本派生稳定的 SKU id。
+ *
+ * 不能用数组下标（`-s0`/`-s1`）：同一商品两次导入若规格顺序或数量变化，
+ * id 就会错位，价格历史随之断裂。
+ */
+function stableSkuId(productId: string, specText: string, taken: Set<string>): string {
+  const base = `${productId}-s${hash36(specText)}`;
+  let id = base;
+  let n = 1;
+  while (taken.has(id)) id = `${base}-${n++}`;
+  taken.add(id);
+  return id;
+}
+
 /** 解析 CSV 文本（支持引号包裹、双引号转义、CRLF） */
 export function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
@@ -124,6 +162,7 @@ export function tableToProducts(rows: string[][], hasHeader = true): ParseTableR
   }
 
   const grouped = new Map<string, ProductRecord>();
+  const usedSkuIds = new Map<string, Set<string>>();
   const now = Date.now();
 
   for (const r of dataRows) {
@@ -140,7 +179,7 @@ export function tableToProducts(rows: string[][], hasHeader = true): ParseTableR
     let product = grouped.get(groupKey);
     if (!product) {
       product = {
-        id: `imp-${groupKey.replace(/[^\w\u4e00-\u9fa5]/g, '').slice(0, 40)}-${grouped.size}`,
+        id: stableProductId(groupKey),
         itemId,
         shopName,
         shopKey: buildShopKey(shopName),
@@ -156,10 +195,12 @@ export function tableToProducts(rows: string[][], hasHeader = true): ParseTableR
         lastSyncAt: now,
       };
       grouped.set(groupKey, product);
+      usedSkuIds.set(groupKey, new Set());
     }
 
+    const taken = usedSkuIds.get(groupKey)!;
     product.skus.push({
-      id: `${product.id}-s${product.skus.length}`,
+      id: stableSkuId(product.id, specText, taken),
       specText,
       specKey: buildSpecKey(specText),
       specLabel: buildSpecLabel(specText),
