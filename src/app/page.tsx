@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import clsx from 'clsx';
 import { listAllSnapshots, listCategories, listProducts } from '@/lib/db';
 import { useIsClient, useLive } from '@/lib/use-live';
-import { buildCompareMatrix, buildCompareRows, buildOverview } from '@/lib/compare';
+import { buildCompareMatrix, buildOverview, toCompareRows } from '@/lib/compare';
 import { CompareMatrixView } from '@/components/CompareMatrix';
 import { CompareRowCard } from '@/components/CompareRowCard';
 import { AddProductSheet } from '@/components/AddProductSheet';
@@ -27,21 +27,21 @@ export default function DashboardPage() {
   const [q, setQ] = useState('');
   const [addOpen, setAddOpen] = useState(false);
 
-  const allRows = useMemo(() => buildCompareRows(products, categories), [products, categories]);
-  const overview = useMemo(
-    () => buildOverview(products, categories, allRows),
-    [products, categories, allRows]
-  );
-
   const colorMap = useMemo(() => new Map(categories.map((c) => [c.id, c.color])), [categories]);
 
-  /* ── 矩阵：列固定为店铺，行按分类分组 ── */
+  /* ── 矩阵：列固定为店铺，行按分类分组。这里是全量，筛选在下面做 ── */
   const matrix = useMemo(
-    () => buildCompareMatrix(products, categories, snapshots, { minShops, onlyChanged }),
-    [products, categories, snapshots, minShops, onlyChanged]
+    () => buildCompareMatrix(products, categories, snapshots),
+    [products, categories, snapshots]
   );
 
-  /** 行级二次筛选（分类 + 关键词）—— 只减行，不动列，避免横向位置跳动 */
+  // 统计口径与表格共用同一份数据，避免「卡片说 12 个规格、表格却有 58 行」
+  const overview = useMemo(
+    () => buildOverview(products, categories, matrix),
+    [products, categories, matrix]
+  );
+
+  /** 行级筛选（店铺数 + 变动 + 分类 + 关键词）—— 只减行，不动列，避免横向位置跳动 */
   const filteredMatrix = useMemo(() => {
     const keyword = q.trim().toLowerCase();
     const shopNames = matrix.shops.map((s) => s.name);
@@ -54,6 +54,8 @@ export default function DashboardPage() {
       .map((g) => ({
         ...g,
         rows: g.rows.filter((r) => {
+          if (r.shopCount < minShops) return false;
+          if (onlyChanged && r.changedCount === 0) return false;
           if (!keyword) return true;
           const hay = [
             r.specLabel,
@@ -77,25 +79,10 @@ export default function DashboardPage() {
     }
 
     return { ...matrix, groups, rowCount, changedRowCount };
-  }, [matrix, catFilter, q]);
+  }, [matrix, minShops, onlyChanged, catFilter, q]);
 
-  /* ── 卡片视图的行筛选 ── */
-  const rows = useMemo(() => {
-    const keyword = q.trim().toLowerCase();
-    return allRows.filter((r) => {
-      if (r.shopCount < minShops) return false;
-      if (catFilter) {
-        if (catFilter === '__none__' ? r.categoryId !== null : r.categoryId !== catFilter) return false;
-      }
-      if (keyword) {
-        const hay = `${r.specLabel} ${r.specKey} ${r.categoryName} ${r.cells
-          .map((c) => `${c.shopName} ${c.skuSpecText}`)
-          .join(' ')}`.toLowerCase();
-        if (!hay.includes(keyword)) return false;
-      }
-      return true;
-    });
-  }, [allRows, minShops, catFilter, q]);
+  /* ── 卡片视图：从同一份矩阵结果转换，保证两个视图行数一致 ── */
+  const rows = useMemo(() => toCompareRows(filteredMatrix), [filteredMatrix]);
 
   const rowCount = view === 'matrix' ? filteredMatrix.rowCount : rows.length;
 

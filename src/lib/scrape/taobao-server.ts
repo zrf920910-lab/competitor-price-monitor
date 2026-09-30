@@ -85,7 +85,15 @@ export function parseDetail(itemId: string, url: string, payload: Record<string,
     | undefined;
 
   const sku2info = pick(payload, ['skuCore', 'sku2info']) as
-    | Record<string, { price?: { priceText?: string; priceMoney?: number }; quantity?: string | number; subPrice?: { priceText?: string } }>
+    | Record<
+        string,
+        {
+          // priceMoney 单位是「分」，接口有时返回字符串（"7500"）
+          price?: { priceText?: string; priceMoney?: string | number };
+          quantity?: string | number;
+          subPrice?: { priceText?: string; priceMoney?: string | number };
+        }
+      >
     | undefined;
 
   // pid:vid → 名称
@@ -100,11 +108,21 @@ export function parseDetail(itemId: string, url: string, payload: Record<string,
 
   for (const sku of skuBase?.skus ?? []) {
     const skuId = String(sku.skuId ?? '');
-    const info = sku2info?.[skuId] ?? sku2info?.['0'] ?? sku2info?.['0;0'];
-    const priceText = info?.price?.priceText;
-    const priceMoney = info?.price?.priceMoney;
-    let price = priceText !== undefined ? parseFloat(String(priceText).replace(/[^\d.]/g, '')) : NaN;
-    if (!Number.isFinite(price) && typeof priceMoney === 'number') price = priceMoney / 100;
+    // sku2info['0'] 是「商品起价」，多规格商品里不能拿它冒充某个 SKU 的价
+    const info =
+      sku2info?.[skuId] ??
+      ((skuBase?.skus ?? []).length === 1 ? (sku2info?.['0'] ?? sku2info?.['0;0']) : undefined);
+    if (!info) continue;
+
+    let price =
+      info.price?.priceText !== undefined
+        ? parseFloat(String(info.price.priceText).replace(/[^\d.]/g, ''))
+        : NaN;
+    if (!Number.isFinite(price)) {
+      // priceMoney 单位是「分」，且新版接口返回的是字符串（"7500"）
+      const money = Number(info.price?.priceMoney);
+      if (Number.isFinite(money) && money > 0) price = money / 100;
+    }
     if (!Number.isFinite(price) || price <= 0) continue;
 
     const specParts = String(sku.propPath ?? '')
@@ -112,18 +130,24 @@ export function parseDetail(itemId: string, url: string, payload: Record<string,
       .map((seg) => valueName.get(seg) ?? seg)
       .filter(Boolean);
 
-    const qtyRaw = info?.quantity;
+    const qtyRaw = info.quantity;
     const stock = qtyRaw !== undefined && qtyRaw !== null ? Number(qtyRaw) : undefined;
 
-    const subPriceText = info?.subPrice?.priceText;
-    const originalPrice =
-      subPriceText !== undefined ? parseFloat(String(subPriceText).replace(/[^\d.]/g, '')) : undefined;
+    let originalPrice =
+      info.subPrice?.priceText !== undefined
+        ? parseFloat(String(info.subPrice.priceText).replace(/[^\d.]/g, ''))
+        : NaN;
+    if (!Number.isFinite(originalPrice)) {
+      const subMoney = Number(info.subPrice?.priceMoney);
+      if (Number.isFinite(subMoney) && subMoney > 0) originalPrice = subMoney / 100;
+    }
 
     skus.push({
       specText: specParts.join(' ') || '默认规格',
       price,
-      originalPrice: Number.isFinite(originalPrice as number) && (originalPrice as number) > price ? originalPrice : undefined,
-      stock: Number.isFinite(stock as number) ? (stock as number) : undefined,
+      originalPrice:
+        Number.isFinite(originalPrice) && originalPrice > price ? originalPrice : undefined,
+      stock: Number.isFinite(stock) ? (stock as number) : undefined,
     });
   }
 

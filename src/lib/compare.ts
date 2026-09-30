@@ -11,10 +11,11 @@ import type {
   MatrixRow,
   MatrixShop,
   ProductRecord,
+  SkuRecord,
   SnapshotRecord,
 } from './types';
 import { resolveCategoryId } from './classify';
-import { buildSpecLabel } from './normalize';
+import { buildSpecKey, buildSpecLabel, normalizeText } from './normalize';
 
 /** 规格键排序：先比主数值，再比单位，最后比数量 */
 export function compareSpecKey(a: string, b: string): number {
@@ -35,98 +36,33 @@ export function compareSpecKey(a: string, b: string): number {
 
 const UNCATEGORIZED_ID = '__uncategorized__';
 
-export interface BuildOptions {
-  /** 只保留有 ≥N 家店铺报价的行 */
-  minShops?: number;
-}
-
-export function buildCompareRows(
-  products: ProductRecord[],
-  categories: CategoryRecord[],
-  options: BuildOptions = {}
-): CompareRow[] {
-  const { minShops = 1 } = options;
-  const catMap = new Map(categories.map((c) => [c.id, c]));
-  const buckets = new Map<string, Map<string, CompareCell[]>>();
-  const labels = new Map<string, string>();
-
-  for (const p of products) {
-    if (!p.skus || p.skus.length === 0) continue;
-    const catId = resolveCategoryId(p) ?? UNCATEGORIZED_ID;
-
-    for (const sku of p.skus) {
-      if (!Number.isFinite(sku.price) || sku.price <= 0) continue;
-      const specKey = sku.manualSpecKey || sku.specKey || 'unknown';
-
-      let specBucket = buckets.get(catId);
-      if (!specBucket) {
-        specBucket = new Map();
-        buckets.set(catId, specBucket);
-      }
-      const cells = specBucket.get(specKey) ?? [];
-      cells.push({
-        shopKey: p.shopKey,
-        shopName: p.shopName || p.shopKey,
-        productId: p.id,
-        productTitle: p.title,
-        skuId: sku.id,
-        skuSpecText: sku.specText,
-        price: sku.price,
-        originalPrice: sku.originalPrice,
-        stock: sku.stock,
-        sold: sku.sold,
-        url: p.url,
-        updatedAt: sku.updatedAt || p.updatedAt,
-      });
-      specBucket.set(specKey, cells);
-
-      if (!labels.has(`${catId}::${specKey}`)) {
-        labels.set(`${catId}::${specKey}`, sku.specLabel || buildSpecLabel(sku.specText));
-      }
-    }
-  }
-
-  const rows: CompareRow[] = [];
-
-  for (const [catId, specBucket] of buckets) {
-    for (const [specKey, rawCells] of specBucket) {
-      // 同店同规格：保留最低价
-      const byShop = new Map<string, CompareCell>();
-      for (const cell of rawCells) {
-        const prev = byShop.get(cell.shopKey);
-        if (!prev || cell.price < prev.price) byShop.set(cell.shopKey, cell);
-      }
-      const cells = [...byShop.values()].sort((a, b) => a.price - b.price);
-      if (cells.length < minShops) continue;
-
-      const prices = cells.map((c) => c.price);
-      const minPrice = Math.min(...prices);
-      const maxPrice = Math.max(...prices);
-      const avgPrice = prices.reduce((s, v) => s + v, 0) / prices.length;
-      const cat = catMap.get(catId);
-
-      rows.push({
-        id: `${catId}::${specKey}`,
-        categoryId: catId === UNCATEGORIZED_ID ? null : catId,
-        categoryName: cat?.name ?? '未分类',
-        specKey,
-        specLabel: labels.get(`${catId}::${specKey}`) ?? specKey,
-        cells,
-        minPrice,
-        maxPrice,
-        avgPrice,
-        spread: maxPrice - minPrice,
-        spreadRate: minPrice > 0 ? (maxPrice - minPrice) / minPrice : 0,
-        shopCount: cells.length,
-      });
-    }
-  }
-
-  return rows.sort((a, b) => {
-    const ca = a.categoryName.localeCompare(b.categoryName, 'zh-Hans-CN');
-    if (ca !== 0) return ca;
-    return compareSpecKey(a.specKey, b.specKey);
-  });
+/**
+ * 把矩阵结果摊平成「一行一个规格」的卡片数据。
+ *
+ * 卡片视图和对比表必须共用同一套规格键，否则两边会给出不一样的规格数。
+ * 传进来的 matrix 可以是筛选过的，所以只做形状转换、不做任何聚合决策。
+ */
+export function toCompareRows(matrix: CompareMatrix): CompareRow[] {
+  const { shops } = matrix;
+  return matrix.groups.flatMap((g) =>
+    g.rows.map((row) => ({
+      id: row.id,
+      categoryId: g.categoryId,
+      categoryName: g.categoryName,
+      specKey: row.specKey,
+      specLabel: row.specLabel,
+      cells: row.cells
+        .map((c, i) => (c ? { ...c, shopKey: shops[i].key, shopName: shops[i].name } : null))
+        .filter((c): c is CompareCell => c !== null)
+        .sort((a, b) => a.price - b.price),
+      minPrice: row.minPrice,
+      maxPrice: row.maxPrice,
+      avgPrice: row.avgPrice,
+      spread: row.spread,
+      spreadRate: row.spreadRate,
+      shopCount: row.shopCount,
+    }))
+  );
 }
 
 /** 统计概览 */
@@ -146,7 +82,8 @@ export interface Overview {
 export function buildOverview(
   products: ProductRecord[],
   categories: CategoryRecord[],
-  rows: CompareRow[],
+  /** 看板矩阵。行数 / 跨店行数 / 各分类行数都从它取，保证统计与表格永远一致 */
+  matrix: Pick<CompareMatrix, 'groups' | 'rowCount'>,
   staleDays = 7
 ): Overview {
   const shops = new Set(products.map((p) => p.shopKey));
@@ -157,9 +94,11 @@ export function buildOverview(
   for (const c of categories) byCategoryMap.set(c.id, { name: c.name, rows: 0, products: new Set() });
   byCategoryMap.set(null, { name: '未分类', rows: 0, products: new Set() });
 
-  for (const row of rows) {
-    const entry = byCategoryMap.get(row.categoryId) ?? byCategoryMap.get(null)!;
-    entry.rows += 1;
+  let multiShopRowCount = 0;
+  for (const g of matrix.groups) {
+    const entry = byCategoryMap.get(g.categoryId) ?? byCategoryMap.get(null)!;
+    entry.rows += g.rows.length;
+    multiShopRowCount += g.rows.filter((r) => r.shopCount >= 2).length;
   }
   for (const p of products) {
     const catId = resolveCategoryId(p);
@@ -172,8 +111,8 @@ export function buildOverview(
     skuCount: products.reduce((s, p) => s + (p.skus?.length ?? 0), 0),
     shopCount: shops.size,
     categoryCount: categories.length,
-    compareRowCount: rows.length,
-    multiShopRowCount: rows.filter((r) => r.shopCount >= 2).length,
+    compareRowCount: matrix.rowCount,
+    multiShopRowCount,
     errorCount: products.filter((p) => p.status === 'error').length,
     staleCount: products.filter((p) => !p.lastSyncAt || now - p.lastSyncAt > staleMs).length,
     byCategory: [...byCategoryMap.entries()]
@@ -216,6 +155,36 @@ function pickPrevSnapshot(
   return undefined;
 }
 
+/**
+ * 规格键是否是「没识别出来」的退化值。
+ *
+ * 抓取不完整时（只拿到商品起价），所有商品的规格键都会退化成同一个值。
+ * 直接拿它分行，几十个商品会被合并成一行 —— 表现就是「对比表只有一个对比项」。
+ */
+export function isDegenerateSpecKey(key: string): boolean {
+  const k = (key ?? '').trim();
+  if (!k) return true;
+  if (k === 'unknown') return true;
+  if (/^默认(规格|款)?$/.test(k)) return true;
+  // 纯符号（如 ":"、";:"）也是没识别出来的表现
+  return !/[\u4e00-\u9fa5a-zA-Z0-9]/.test(k);
+}
+
+/**
+ * 细粒度规格键：把规格文本归一化成可直接比较的形式。
+ *
+ * 用在「粗键区分度不够」的场合 —— 例如淘宝上大量商品的规格名是
+ * "套装（含箱+2个4KG+2个面具）"、"空箱（可放2个4KG）" 这种长描述，
+ * 粗键都只会提取出 "4kg"，于是几十个 SKU 全挤在一行。
+ * 换成归一化全文后，同款商品同款话术仍能自动对齐，不同规格则各占一行。
+ */
+function fineSpecKey(text: string): string {
+  const s = normalizeText(text)
+    .replace(/[\s()（）[\]【】{}｛｝,，、;；:：·・/\\|+*×x_\-.]/g, '')
+    .slice(0, 40);
+  return s || 'unknown';
+}
+
 export interface MatrixOptions {
   /** 只保留有 ≥N 家店铺报价的行 */
   minShops?: number;
@@ -223,6 +192,109 @@ export interface MatrixOptions {
   onlyChanged?: boolean;
   /** 只保留有价差的行（真正可跨店对比） */
   onlySpread?: boolean;
+}
+
+/* ==================================================================
+   规格键解析 —— 两个视图（对比表 / 卡片）共用的唯一口径
+   ================================================================== */
+
+/** 单个 SKU 的最终归属 */
+interface ResolvedSpec {
+  catId: string;
+  /** 粗键：manualSpecKey || specKey —— 跨店对齐的主力（"4kg"、"500ml*2"） */
+  coarseKey: string;
+  /** 最终用来分行的键 */
+  specKey: string;
+  /** 因为粗键区分不出来而细化了 */
+  refined: boolean;
+  /** 规格始终没识别出来（抓取只拿到商品起价） */
+  degenerate: boolean;
+  /** 行标题；退化行由调用方换成商品名 */
+  label: string;
+}
+
+/**
+ * 给每个 SKU 算一个「有效规格键」。
+ *
+ * 淘宝上大量商品的规格名是整句话 —— "套装（含箱+2个4KG+2个面具）"、
+ * "空箱（可放2个4KG）" —— 粗键统一只提出 "4kg"，于是一个商品 29 个 SKU
+ * 全挤进同一行，看起来就像「只抓到一个对比项」。
+ *
+ * 判据：同一个商品在同一个桶里出现 ≥2 个 SKU，说明这个粗键没把它的规格区分开。
+ * 必须整桶一起细化 —— 只改一部分的话，改过的行和没改的行再也对不上。
+ */
+function resolveSpecs(products: ProductRecord[]): Map<SkuRecord, ResolvedSpec> {
+  interface Raw {
+    product: ProductRecord;
+    sku: SkuRecord;
+    catId: string;
+    coarseKey: string;
+    /** 商品身份。不同商品绝不能共用一行，否则就是「只有一个对比项」 */
+    productKey: string;
+    bucketKey: string;
+  }
+
+  const raws: Raw[] = [];
+  /** bucketKey → productKey → 该商品在这个桶里塞了几个 SKU */
+  const bucketStats = new Map<string, Map<string, number>>();
+
+  for (const p of products) {
+    if (!p.skus?.length) continue;
+    const catId = resolveCategoryId(p) ?? UNCATEGORIZED_ID;
+    const productKey = p.itemId || p.id;
+
+    for (const sku of p.skus) {
+      if (!Number.isFinite(sku.price) || sku.price <= 0) continue;
+
+      const coarseKey = sku.manualSpecKey || sku.specKey || 'unknown';
+      const bucketKey = `${catId}::${coarseKey}`;
+
+      let perProduct = bucketStats.get(bucketKey);
+      if (!perProduct) {
+        perProduct = new Map();
+        bucketStats.set(bucketKey, perProduct);
+      }
+      perProduct.set(productKey, (perProduct.get(productKey) ?? 0) + 1);
+
+      raws.push({ product: p, sku, catId, coarseKey, productKey, bucketKey });
+    }
+  }
+
+  const refineBuckets = new Set<string>();
+  for (const [bucketKey, perProduct] of bucketStats) {
+    for (const count of perProduct.values()) {
+      if (count > 1) {
+        refineBuckets.add(bucketKey);
+        break;
+      }
+    }
+  }
+
+  const out = new Map<SkuRecord, ResolvedSpec>();
+  for (const { sku, catId, coarseKey, productKey, bucketKey } of raws) {
+    const refined = refineBuckets.has(bucketKey);
+    let specKey = refined ? fineSpecKey(sku.specText) : coarseKey;
+
+    // 细键也还是空的 / 纯符号 → 退回「粗键 + 商品」按商品拆行。
+    // 宁可同一商品的规格各自成行，也不能让不同商品塌成一行。
+    const degenerate = isDegenerateSpecKey(specKey);
+    if (degenerate) specKey = `${coarseKey}::${productKey}`;
+
+    out.set(sku, {
+      catId,
+      coarseKey,
+      specKey,
+      refined: refined && !degenerate,
+      degenerate,
+      label: degenerate
+        ? ''
+        : refined
+          ? // 细化过的行必须显示原始规格文本 —— 否则 29 行全叫 "4KG"，等于没区分
+            sku.specText.trim().slice(0, 28) || specKey
+          : sku.specLabel || buildSpecLabel(sku.specText),
+    });
+  }
+  return out;
 }
 
 export function buildCompareMatrix(
@@ -234,33 +306,46 @@ export function buildCompareMatrix(
   const { minShops = 1, onlyChanged = false, onlySpread = false } = options;
   const history = buildPriceHistory(snapshots);
   const catMap = new Map(categories.map((c) => [c.id, c]));
+  const resolved = resolveSpecs(products);
 
-  /* ── 1. 归集：分类 → 规格键 → 店铺 → 单元格 ── */
+  /* ── 1. 定列：哪些店铺有报价 ── */
+  const shopMeta = new Map<string, { name: string; products: Set<string> }>();
+  for (const p of products) {
+    if (!p.skus?.some((s) => Number.isFinite(s.price) && s.price > 0)) continue;
+    const meta = shopMeta.get(p.shopKey) ?? { name: p.shopName || p.shopKey, products: new Set<string>() };
+    meta.products.add(p.id);
+    shopMeta.set(p.shopKey, meta);
+  }
+
+  /* ── 2. 归集：分类 → 规格键 → 店铺 → 单元格 ── */
   const byCat = new Map<string, Map<string, Map<string, MatrixCell>>>();
   const labels = new Map<string, string>();
-  const shopMeta = new Map<string, { name: string; products: Set<string> }>();
+  /** 规格始终没认出来的行：UI 上要明确标出来，不能假装是正常对比 */
+  const degenerateKeys = new Set<string>();
+  /** 被细化过的行 → 它原本的粗键，UI 拿来做次级标注 */
+  const refinedKeys = new Map<string, string>();
 
   for (const p of products) {
     if (!p.skus?.length) continue;
 
-    const meta = shopMeta.get(p.shopKey) ?? { name: p.shopName || p.shopKey, products: new Set<string>() };
-    meta.products.add(p.id);
-    shopMeta.set(p.shopKey, meta);
-
-    const catId = resolveCategoryId(p) ?? UNCATEGORIZED_ID;
-    let bucket = byCat.get(catId);
-    if (!bucket) {
-      bucket = new Map();
-      byCat.set(catId, bucket);
-    }
-
     for (const sku of p.skus) {
       if (!Number.isFinite(sku.price) || sku.price <= 0) continue;
-      const specKey = sku.manualSpecKey || sku.specKey || 'unknown';
+      const spec = resolved.get(sku);
+      if (!spec) continue;
+
+      const { catId, specKey, coarseKey, refined, degenerate } = spec;
       const cellTs = sku.updatedAt || p.updatedAt;
       const labelKey = `${catId}::${specKey}`;
       if (!labels.has(labelKey)) {
-        labels.set(labelKey, sku.specLabel || buildSpecLabel(sku.specText));
+        labels.set(labelKey, degenerate ? p.title.slice(0, 18) : spec.label);
+        if (refined) refinedKeys.set(labelKey, coarseKey);
+      }
+      if (degenerate) degenerateKeys.add(labelKey);
+
+      let bucket = byCat.get(catId);
+      if (!bucket) {
+        bucket = new Map();
+        byCat.set(catId, bucket);
       }
 
       let specBucket = bucket.get(specKey);
@@ -297,7 +382,7 @@ export function buildCompareMatrix(
     }
   }
 
-  /* ── 2. 定列：只保留真正出现在对比行里的店铺 ── */
+  /* ── 3. 定列：只保留真正出现在对比行里的店铺 ── */
   const activeShops = new Set<string>();
   for (const bucket of byCat.values()) {
     for (const specBucket of bucket.values()) {
@@ -319,7 +404,7 @@ export function buildCompareMatrix(
 
   const shopIndex = new Map(shops.map((s, i) => [s.key, i]));
 
-  /* ── 3. 出行：按分类顺序，组内按规格键排序 ── */
+  /* ── 4. 出行：按分类顺序，组内按规格键排序 ── */
   const categoryOrder = new Map(categories.map((c, i) => [c.id, i]));
   const catIds = [...byCat.keys()].sort((a, b) => {
     const oa = categoryOrder.get(a) ?? Number.MAX_SAFE_INTEGER;
@@ -376,6 +461,8 @@ export function buildCompareMatrix(
         id: `${catId}::${specKey}`,
         specKey,
         specLabel: labels.get(`${catId}::${specKey}`) ?? specKey,
+        groupKey: refinedKeys.get(`${catId}::${specKey}`),
+        degenerate: degenerateKeys.has(`${catId}::${specKey}`),
         cells,
         minPrice,
         maxPrice,
@@ -391,7 +478,16 @@ export function buildCompareMatrix(
     }
 
     if (rows.length === 0) continue;
-    rows.sort((a, b) => compareSpecKey(a.specKey, b.specKey));
+    // 细化行的 specKey 是归一化全文（"套餐一4kg灭火器1具灭火器箱1个"），
+    // compareSpecKey 从里面解不出数值，只能按文本码点排 ——
+    // 所以先按「能从标签里认出的数值规格」分组，同组再按文本排。
+    rows.sort((a, b) => {
+      const ka = buildSpecKey(a.specLabel || a.specKey);
+      const kb = buildSpecKey(b.specLabel || b.specKey);
+      const c = compareSpecKey(ka, kb);
+      if (c !== 0) return c;
+      return (a.specLabel || a.specKey).localeCompare(b.specLabel || b.specKey, 'zh-Hans-CN');
+    });
 
     const cat = catMap.get(catId);
     groups.push({

@@ -74,12 +74,18 @@ export function parseDetail(itemId, url, payload, source = 'script') {
   const skus = [];
   for (const sku of skuBase.skus ?? []) {
     const skuId = String(sku.skuId ?? '');
-    const info = sku2info[skuId] ?? sku2info['0'] ?? sku2info['0;0'];
+    // sku2info['0'] 是「商品起价」。多规格商品里某个 SKU 查不到价时，
+    // 用起价冒充会写出错误数据 —— 所以只在单品兜底时允许。
+    const info =
+      sku2info[skuId] ??
+      ((skuBase.skus ?? []).length === 1 ? (sku2info['0'] ?? sku2info['0;0']) : undefined);
     if (!info) continue;
 
     let price = toPrice(info?.price?.priceText);
-    if (!Number.isFinite(price) && typeof info?.price?.priceMoney === 'number') {
-      price = info.price.priceMoney / 100;
+    if (!Number.isFinite(price)) {
+      // priceMoney 单位是「分」，且新版接口返回字符串（"7500"），不能只认 number
+      const money = Number(info?.price?.priceMoney);
+      if (Number.isFinite(money) && money > 0) price = money / 100;
     }
     if (!Number.isFinite(price) || price <= 0) continue;
 
@@ -90,7 +96,12 @@ export function parseDetail(itemId, url, payload, source = 'script') {
 
     const qtyRaw = info?.quantity;
     const stock = qtyRaw !== undefined && qtyRaw !== null ? Number(qtyRaw) : undefined;
-    const originalPrice = toPrice(info?.subPrice?.priceText);
+
+    let originalPrice = toPrice(info?.subPrice?.priceText);
+    if (!Number.isFinite(originalPrice)) {
+      const subMoney = Number(info?.subPrice?.priceMoney);
+      if (Number.isFinite(subMoney) && subMoney > 0) originalPrice = subMoney / 100;
+    }
 
     skus.push({
       specText: specParts.join(' ') || '默认规格',
@@ -123,6 +134,82 @@ export function parseDetail(itemId, url, payload, source = 'script') {
 /** 从任意 mtop 响应信封里取出 detail payload */
 export function unwrapPayload(env) {
   return env?.data?.data ?? env?.data ?? env;
+}
+
+/**
+ * 从页面全局变量里取详情数据 —— 新版淘宝 PC 详情页的主数据源。
+ *
+ * 2025 起 item.taobao.com 的详情页**不再请求** mtop.taobao.detail.getdetail，
+ * 改为 SSR 把结果内联在 window.__ICE_APP_CONTEXT__ 里，
+ * 路径 `loaderData.home.data.res`，其中 skuBase / skuCore 的结构与老接口一致，
+ * 所以 parseDetail 可以直接复用。
+ *
+ * @returns {Promise<object|null>} 与 mtop payload 同构的对象
+ */
+export async function readDetailFromPage(page) {
+  return page
+    .evaluate(() => {
+      const hasSkus = (o) => Array.isArray(o?.skuBase?.skus) && o.skuBase.skus.length > 0;
+
+      const candidates = [
+        globalThis.__ICE_APP_CONTEXT__?.loaderData?.home?.data?.res,
+        globalThis.__ICE_APP_CONTEXT__?.loaderData?.home?.data,
+        globalThis.__ICE_APP_CONTEXT__?.loaderData?.pcdetail?.data?.res,
+        globalThis.__INITIAL_DATA__?.data?.res,
+        globalThis.__INITIAL_DATA__?.data,
+        globalThis.__detail_data__,
+      ];
+
+      let hit = candidates.find(hasSkus);
+
+      // 兜底：扫一遍 window 顶层，找带 skuBase.skus 的对象
+      if (!hit) {
+        for (const k of Object.keys(globalThis)) {
+          if (k === 'window' || k === 'self' || k === 'top' || k === 'parent' || k === 'globalThis') continue;
+          let v;
+          try {
+            v = globalThis[k];
+          } catch {
+            continue;
+          }
+          if (v && typeof v === 'object' && hasSkus(v)) {
+            hit = v;
+            break;
+          }
+        }
+      }
+      if (!hit) return null;
+
+      // 只回传需要的字段，避免把整个页面上下文序列化过去
+      const num = (v) => (v === undefined || v === null ? undefined : String(v));
+      const sku2info = {};
+      for (const [k, v] of Object.entries(hit.skuCore?.sku2info ?? {})) {
+        sku2info[k] = {
+          price: { priceText: num(v?.price?.priceText), priceMoney: num(v?.price?.priceMoney) },
+          subPrice: { priceText: num(v?.subPrice?.priceText), priceMoney: num(v?.subPrice?.priceMoney) },
+          quantity: v?.quantity,
+        };
+      }
+
+      return {
+        item: {
+          title: hit.item?.title,
+          price: num(hit.item?.price),
+          images: Array.isArray(hit.item?.images) ? hit.item.images.slice(0, 1) : undefined,
+        },
+        seller: { shopName: hit.seller?.shopName, nick: hit.seller?.nick },
+        skuBase: {
+          props: (hit.skuBase?.props ?? []).map((p) => ({
+            pid: p.pid,
+            name: p.name,
+            values: (p.values ?? []).map((v) => ({ vid: v.vid, name: v.name })),
+          })),
+          skus: (hit.skuBase?.skus ?? []).map((s) => ({ skuId: s.skuId, propPath: s.propPath })),
+        },
+        skuCore: { sku2info },
+      };
+    })
+    .catch(() => null);
 }
 
 /* ---------------- 浏览器 ---------------- */
@@ -223,13 +310,24 @@ export async function gotoLogin(page) {
 
 /* ---------------- 单商品抓取 ---------------- */
 
+/** 从捕获到的 mtop 响应里挑 SKU 最全的一份 */
+function pickBestPayload(captured) {
+  let best = null;
+  for (const env of captured) {
+    const payload = unwrapPayload(env);
+    const n = payload?.skuBase?.skus?.length ?? 0;
+    if (n > 0 && n > (best?.skuBase?.skus?.length ?? 0)) best = payload;
+  }
+  return best;
+}
+
 /**
  * 在给定 page 上抓取一个商品
  * @param {import('playwright').Page} page
  * @param {string} url
  * @returns {Promise<object>} ScrapeResult
  */
-export async function scrapeOnPage(page, url, { source = 'script', waitMs = 6000 } = {}) {
+export async function scrapeOnPage(page, url, { source = 'script', waitMs = 12000 } = {}) {
   const itemId = extractItemId(url);
   const target = toItemUrl(url);
   if (!itemId || !target) {
@@ -260,14 +358,31 @@ export async function scrapeOnPage(page, url, { source = 'script', waitMs = 6000
   try {
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
-    // 等接口数据回来
-    const step = 500;
-    for (let waited = 0; waited < waitMs && captured.length === 0; waited += step) {
-      await page.waitForTimeout(step);
+    // 两条数据源并行等，谁先到用谁：
+    //   ① 新版 PC 详情页 —— SSR 数据内联在 window.__ICE_APP_CONTEXT__
+    //   ② 老版 —— 页面自己发出的 mtop.taobao.detail.getdetail 响应
+    const deadline = Date.now() + waitMs;
+    let fromPage = null;
+    let best = null;
+
+    while (Date.now() < deadline) {
+      fromPage = await readDetailFromPage(page);
+      if (fromPage) break;
+
+      best = pickBestPayload(captured);
+      if (best) break;
+
+      await page.waitForTimeout(400);
     }
 
-    // 页面内主动补一次请求
-    if (captured.length === 0) {
+    // 内联 SSR 数据最完整，优先
+    if (fromPage) {
+      const result = parseDetail(itemId, target, fromPage, source);
+      if (result.skus.length > 0) return result;
+    }
+
+    // 老路径：页面内主动补一次 mtop 请求
+    if (!best) {
       const manual = await page
         .evaluate(async (id) => {
           const mtop = globalThis.lib?.mtop || globalThis.mtop;
@@ -286,17 +401,13 @@ export async function scrapeOnPage(page, url, { source = 'script', waitMs = 6000
         }, itemId)
         .catch(() => null);
       if (manual) captured.push(manual);
+      best = pickBestPayload(captured);
     }
 
-    // 选 SKU 最全的那份
-    let best = null;
-    for (const env of captured) {
-      const payload = unwrapPayload(env);
-      const n = payload?.skuBase?.skus?.length ?? 0;
-      if (n > 0 && n > (best?.skuBase?.skus?.length ?? 0)) best = payload;
+    if (best) {
+      const result = parseDetail(itemId, target, best, source);
+      if (result.skus.length > 0) return result;
     }
-
-    if (best) return parseDetail(itemId, target, best, source);
 
     // DOM 兜底
     const fallback = await page
@@ -319,10 +430,13 @@ export async function scrapeOnPage(page, url, { source = 'script', waitMs = 6000
       title: fallback.title || '(未获取到标题)',
       shopName: fallback.shop || '未知店铺',
       url: target,
+      // 明确标注这是「商品起价」而不是某个规格的价，避免在对比表里被当成真实规格
       skus: hasPrice ? [{ specText: '默认规格', price }] : [],
       scrapedAt: Date.now(),
       source,
-      error: hasPrice ? undefined : '未捕获到 SKU 接口数据（可能需要重新登录）',
+      error: hasPrice
+        ? '未解析到 SKU 明细，仅记录商品起价（页面结构可能已变化）'
+        : '未捕获到 SKU 数据（可能需要重新登录）',
     };
   } catch (e) {
     return {

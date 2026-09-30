@@ -111,9 +111,14 @@ export function buildSpecKey(input: string): string {
     // 没有数值规格：退化为清洗后的文本骨架（去掉常见噪音词）
     base = normalizeText(input)
       .replace(/[a-z0-9]+/g, ' ')
+      .replace(/[^\u4e00-\u9fa5]+/g, '') // 标点/符号一并丢掉，否则 ":" 会被当成有效骨架
       .replace(/\s+/g, '')
       .slice(0, 12);
-    if (!base) base = normalizeText(input).slice(0, 12) || 'unknown';
+    if (!base) {
+      // 纯数字 / 字母 / 符号的规格（"A"、"1"、"1627207:28320"）：
+      // 必须回落到原文 —— 一旦统一返回同一个值，这些 SKU 会全部塌缩成一行
+      base = normalizeText(input).replace(/[\s;:]+/g, '').slice(0, 16) || 'unknown';
+    }
   } else {
     // 按单位分组取最大数值（同一单位出现多次时取最大，通常主规格更大）
     const byUnit = new Map<string, number>();

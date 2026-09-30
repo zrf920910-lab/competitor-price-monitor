@@ -173,6 +173,13 @@ export interface MatrixRow {
   id: string;
   specKey: string;
   specLabel: string;
+  /**
+   * 粗键（如 "4kg*2"）。只有在这一行是从「粗键区分不出来」的桶里细化出来的时候才有，
+   * UI 拿它做次级标注 —— 让人还能看出这几行原本归在同一组。
+   */
+  groupKey?: string;
+  /** 规格没识别出来（抓取只拿到商品起价），此行按商品拆分而非按规格对齐 */
+  degenerate?: boolean;
   /** 与 shops 等长，索引一一对应；null = 该店没有这个规格 */
   cells: Array<MatrixCell | null>;
   minPrice: number;

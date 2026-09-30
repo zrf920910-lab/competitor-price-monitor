@@ -5,10 +5,20 @@ import clsx from 'clsx';
 import type { CompareMatrix, MatrixCell, MatrixRow, MatrixShop } from '@/lib/types';
 import { dateTime, pct, yuan } from '@/lib/format';
 
-/** 首列（规格）冻结宽度 */
-const SPEC_COL_W = 126;
+/** 首列（规格）冻结宽度。淘宝的规格名常是整句话，太窄就只能看见前缀 */
+const SPEC_COL_W = 168;
 /** 店铺列宽：店多时收窄，保证一屏能看到 2~3 列 */
-const shopColWidth = (count: number) => (count > 6 ? 84 : count > 4 ? 94 : 106);
+const shopColWidth = (count: number) => (count > 6 ? 84 : count > 4 ? 94 : count > 2 ? 100 : 92);
+
+/** "4kg*2" → "4KG × 2"。分组键是机器格式，直接显示没人看得懂 */
+function prettyKey(key: string): string {
+  const [base, qty] = key.split('*');
+  const pretty = base
+    .split('+')
+    .map((part) => part.replace(/^([\d.]+)([a-z]+)$/, (_, n, u) => `${n}${u.toUpperCase()}`))
+    .join(' + ');
+  return qty && Number(qty) > 1 ? `${pretty} × ${qty}` : pretty;
+}
 
 /* ───────────────────────── 单元格配色 ─────────────────────────
    底色表达「横向贵贱」：最低绿、最高红
@@ -84,6 +94,8 @@ export function CompareMatrixView({
   if (groups.length === 0 || shops.length === 0) return null;
 
   const colW = shopColWidth(shops.length);
+  const degenerateCount = groups.reduce((n, g) => n + g.rows.filter((r) => r.degenerate).length, 0);
+  const refinedCount = groups.reduce((n, g) => n + g.rows.filter((r) => r.groupKey).length, 0);
 
   return (
     <section className="card overflow-hidden animate-in">
@@ -102,6 +114,19 @@ export function CompareMatrixView({
           <span className="tabular-nums">
             {shops.length} 列 × {rowCount} 行
           </span>
+          {degenerateCount > 0 ? (
+            <span className="chip bg-warn/15 tabular-nums text-warn" title="这些商品没抓到规格明细，只能按商品逐行列出">
+              {degenerateCount} 行未识别规格
+            </span>
+          ) : null}
+          {refinedCount > 0 ? (
+            <span
+              className="chip bg-brand-50 tabular-nums text-brand-700"
+              title="这些商品的规格名是整句话，按规格名拆成了独立行；行内小字是它原本所属的规格组"
+            >
+              {refinedCount} 行按规格名细分
+            </span>
+          ) : null}
           {changedRowCount > 0 ? (
             <span className="chip bg-up/10 tabular-nums text-up">{changedRowCount} 行有变动</span>
           ) : (
@@ -115,7 +140,8 @@ export function CompareMatrixView({
         className="overflow-auto overscroll-x-contain"
         style={{ maxHeight: maxH ? `${maxH}px` : 'max(14rem, calc(100dvh - 27rem))' }}
       >
-        <table className="w-full border-separate border-spacing-0 text-[12px]">
+        {/* table-fixed 是必须的：规格名是整句话时，auto 布局会按最长的那条把首列撑爆 */}
+        <table className="w-full table-fixed border-separate border-spacing-0 text-[12px]">
           <colgroup>
             <col style={{ width: SPEC_COL_W, minWidth: SPEC_COL_W }} />
             {shops.map((s) => (
@@ -183,7 +209,16 @@ export function CompareMatrixView({
                         {row.specLabel}
                       </div>
                       <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-ink-400">
-                        <span className="font-mono">{row.specKey}</span>
+                        {row.degenerate ? (
+                          <span className="font-medium text-warn">未识别规格</span>
+                        ) : row.groupKey ? (
+                          // 细化行：显示它原本归在哪个粗键下，让人还能看出分组
+                          <span className="font-mono" title={`按规格名细分，原本属于「${row.groupKey}」`}>
+                            {prettyKey(row.groupKey)}
+                          </span>
+                        ) : (
+                          <span className="font-mono">{row.specKey}</span>
+                        )}
                         {row.spread > 0 ? (
                           <span className={clsx('font-medium tabular-nums', spreadTone(row.spreadRate))}>
                             差 {pct(row.spreadRate, 0)}
