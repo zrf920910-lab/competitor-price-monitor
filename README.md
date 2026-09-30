@@ -39,15 +39,31 @@ npm run dev          # http://localhost:3000
 
 ### 方式一：本地抓取代理（推荐）
 
-在电脑上启动一个小服务，PWA 会自动识别它：
+在电脑上启动一个小服务，PWA 会自动识别它。
+
+**macOS 用户：直接双击项目根目录里的 `start-agent.command` 就行。**
+
+它会自动 `cd` 到项目目录、检查并安装依赖、检测浏览器内核（有系统 Chrome 就不下载），然后启动代理。
+首次运行会弹出浏览器，**扫码登录淘宝**（登录态存在 `.playwright-profile/`，之后不用重复登录）。
+窗口保持开着即可，关掉窗口就是停止代理。
+
+> 如果双击提示「无法打开，因为它来自身份不明的开发者」，右键 → 打开 → 再点「打开」即可；
+> 或在「系统设置 → 隐私与安全性」里点「仍要打开」。
+
+习惯命令行的，也可以手动来（**必须先进入项目目录**）：
 
 ```bash
+cd "/Users/hankock/WorkBuddy AI/竞品价格监控"
 npm i -D playwright        # 一次性
 npm run agent              # 启动代理，保持窗口开着
 ```
 
-首次运行会弹出浏览器，**扫码登录淘宝**（登录态存在 `.playwright-profile/`，之后不用重复登录）。
 然后回到 PWA 的「数据」页，看到「本地抓取代理 · 已连接」，就可以在应用里直接抓了。
+
+> **⚠️ 两个常见报错**
+> - `npm error Missing script: "agent"` —— 你不在项目目录里。先 `cd` 到项目根目录。
+> - `error: unknown option '--channel=chrome'` —— 交互式终端里 `#` **不是注释**，
+>   后面的内容会被当成命令参数。要加注释请换行写，或用双击脚本。
 
 代理默认监听 `http://localhost:7788`：
 
@@ -180,6 +196,7 @@ scripts/
 ├── scrape-taobao.mjs           # 命令行批量抓取
 ├── lib/taobao.mjs              # 抓取核心（上面两者共用）
 └── gen-icons.mjs               # 零依赖 PWA 图标生成器
+start-agent.command             # macOS 双击启动代理（免命令行）
 ```
 
 ---
