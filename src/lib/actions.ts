@@ -4,7 +4,9 @@
 
 import { getProduct, listProducts, upsertProduct, updateProduct } from './db';
 import { scrapeViaApi } from './taobao';
+import { agentScrape, resolveChannel, type ScrapeChannel } from './local-agent';
 import { extractItemId } from './normalize';
+import type { ScrapeResult } from './types';
 
 export interface ProgressEvent {
   index: number;
@@ -12,6 +14,8 @@ export interface ProgressEvent {
   url: string;
   status: 'pending' | 'ok' | 'failed';
   message: string;
+  /** 本次实际使用的抓取通道 */
+  channel?: 'agent' | 'api';
 }
 
 export interface BatchResult {
@@ -21,13 +25,42 @@ export interface BatchResult {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** 抓取单个链接（不落库），返回结果或错误 */
-async function scrapeOne(url: string) {
-  const res = await scrapeViaApi(url);
-  if (res.ok && res.result && res.result.skus.length > 0) {
-    return { ok: true as const, result: res.result };
+interface ScrapeOutcome {
+  ok: boolean;
+  result?: ScrapeResult;
+  error?: string;
+  channel: ScrapeChannel;
+}
+
+/**
+ * 抓取单个链接（不落库）。
+ * 通道优先级：本地代理（复用登录态，稳定）→ 线上 API（可能被风控）→ 本地代理回退。
+ */
+async function scrapeOne(url: string): Promise<ScrapeOutcome> {
+  const channel = await resolveChannel();
+
+  if (channel.kind === 'agent' && channel.baseUrl) {
+    const res = await agentScrape(channel.baseUrl, url);
+    if (res.ok && res.result && res.result.skus.length > 0) {
+      return { ok: true, result: res.result, channel };
+    }
+    // 未登录属于「用户可修复」的问题，直接抛出，不回退线上（线上更没戏）
+    if (res.error && /未登录|登录/.test(res.error)) {
+      return { ok: false, error: res.error, channel };
+    }
+    // 其他失败：再试一次线上接口
+    const api = await scrapeViaApi(url);
+    if (api.ok && api.result && api.result.skus.length > 0) {
+      return { ok: true, result: api.result, channel: { kind: 'api', label: '线上接口' } };
+    }
+    return { ok: false, error: res.error ?? '本地代理抓取失败', channel };
   }
-  return { ok: false as const, error: res.error ?? res.hint ?? '未获取到 SKU 数据' };
+
+  const api = await scrapeViaApi(url);
+  if (api.ok && api.result && api.result.skus.length > 0) {
+    return { ok: true, result: api.result, channel };
+  }
+  return { ok: false, error: api.error ?? api.hint ?? '未获取到 SKU 数据', channel };
 }
 
 /**
@@ -57,7 +90,7 @@ export async function addByUrls(
     }
 
     const r = await scrapeOne(url);
-    if (r.ok) {
+    if (r.ok && r.result) {
       await upsertProduct({
         itemId: r.result.itemId,
         title: r.result.title,
@@ -65,7 +98,7 @@ export async function addByUrls(
         shopName: r.result.shopName,
         cover: r.result.cover,
         skus: r.result.skus,
-        source: 'api',
+        source: r.channel.kind === 'agent' ? 'script' : 'api',
       });
       result.ok += 1;
       onProgress?.({
@@ -74,14 +107,22 @@ export async function addByUrls(
         url,
         status: 'ok',
         message: `已抓取 ${r.result.skus.length} 个 SKU`,
+        channel: r.channel.kind,
       });
     } else {
       if (keepFailed) {
         const created = await upsertProduct({ itemId: extractItemId(url) ?? undefined, title: '', url, skus: [] });
         await updateProduct(created.id, { status: 'error', error: r.error });
       }
-      result.failed.push({ url, error: r.error });
-      onProgress?.({ index: i, total: unique.length, url, status: 'failed', message: r.error });
+      result.failed.push({ url, error: r.error ?? '抓取失败' });
+      onProgress?.({
+        index: i,
+        total: unique.length,
+        url,
+        status: 'failed',
+        message: r.error ?? '抓取失败',
+        channel: r.channel.kind,
+      });
     }
 
     // 限速，降低被风控概率
@@ -100,14 +141,16 @@ async function markPending(url: string) {
 }
 
 /** 刷新单个商品的价格 */
-export async function refreshProduct(productId: string): Promise<{ ok: boolean; error?: string; count?: number }> {
+export async function refreshProduct(
+  productId: string
+): Promise<{ ok: boolean; error?: string; count?: number; channel?: 'agent' | 'api' }> {
   const product = await getProduct(productId);
   if (!product) return { ok: false, error: '商品不存在' };
 
   const r = await scrapeOne(product.url);
-  if (!r.ok) {
+  if (!r.ok || !r.result) {
     await updateProduct(productId, { status: 'error', error: r.error, lastAttemptAt: Date.now() });
-    return { ok: false, error: r.error };
+    return { ok: false, error: r.error ?? '抓取失败', channel: r.channel.kind };
   }
 
   await upsertProduct({
@@ -117,9 +160,9 @@ export async function refreshProduct(productId: string): Promise<{ ok: boolean; 
     shopName: r.result.shopName || product.shopName,
     cover: r.result.cover || product.cover,
     skus: r.result.skus,
-    source: 'api',
+    source: r.channel.kind === 'agent' ? 'script' : 'api',
   });
-  return { ok: true, count: r.result.skus.length };
+  return { ok: true, count: r.result.skus.length, channel: r.channel.kind };
 }
 
 /** 刷新全部商品 */
@@ -146,6 +189,7 @@ export async function refreshAll(
         url: p.url,
         status: 'ok',
         message: `已更新 ${r.count} 个 SKU`,
+        channel: r.channel,
       });
     } else {
       result.failed.push({ url: p.url, error: r.error ?? '未知错误' });
@@ -155,6 +199,7 @@ export async function refreshAll(
         url: p.url,
         status: 'failed',
         message: r.error ?? '未知错误',
+        channel: r.channel,
       });
     }
     if (i < targets.length - 1) await sleep(800);

@@ -7,6 +7,7 @@ import { useIsClient, useLive } from '@/lib/use-live';
 import { autoParse } from '@/lib/import';
 import { Field, ConfirmDialog } from '@/components/ui';
 import { useToast } from '@/components/Toast';
+import { LocalAgentCard } from '@/components/LocalAgentCard';
 
 const CODE = 'font-mono text-[11px]';
 
@@ -113,18 +114,26 @@ export default function DataPage() {
 
   return (
     <div className="space-y-3">
-      {/* 本地抓取脚本 */}
+      {/* 本地抓取代理 */}
+      <LocalAgentCard />
+
+      {/* 批量抓取脚本 */}
       <section className="card overflow-hidden">
         <div className="flex items-center gap-2 px-4 pb-2 pt-3.5">
           <span className="text-base">🖥️</span>
           <div>
-            <p className="text-[13px] font-semibold text-ink-900">本地脚本抓取（推荐）</p>
-            <p className="text-[11px] text-ink-500">复用你浏览器的登录态，能拿到完整的 SKU 价格</p>
+            <p className="text-[13px] font-semibold text-ink-900">批量抓取脚本</p>
+            <p className="text-[11px] text-ink-500">
+              一次性抓很多链接时用；日常单点抓取用上面的本地代理更顺手
+            </p>
           </div>
         </div>
         <div className="space-y-2.5 px-4 pb-4">
           <Step n={1} title="安装浏览器内核（仅首次）">
             <code className={CODE}>npx playwright install chromium</code>
+            <span className="block w-full text-[10px] leading-4 text-ink-400">
+              已装 Chrome 可跳过此步，启动时加 --channel=chrome
+            </span>
           </Step>
           <Step n={2} title="把要抓的商品链接写进 data/urls.txt（一行一个），然后运行">
             <code className={CODE}>npm run scrape</code>

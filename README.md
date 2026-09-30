@@ -34,45 +34,67 @@ npm run dev          # http://localhost:3000
 
 ## 抓取价格：三种方式
 
-> **先说结论**：淘宝对机房 IP 有严格风控，纯云端抓取成功率不稳定。**推荐用本地脚本**，它复用你浏览器的登录态，能稳定拿到完整 SKU。
+> **先说结论**：淘宝对机房 IP 有严格风控，纯云端抓取（Vercel 上）基本不可用。
+> **推荐用本地抓取代理** —— 在电脑上跑一条命令，PWA 里的「抓取」按钮就直接能用，体验和在线一样。
 
-### 方式一：本地脚本（推荐，最可靠）
+### 方式一：本地抓取代理（推荐）
+
+在电脑上启动一个小服务，PWA 会自动识别它：
 
 ```bash
-npm i -D playwright
-npx playwright install chromium
+npm i -D playwright        # 一次性
+npm run agent              # 启动代理，保持窗口开着
+```
 
+首次运行会弹出浏览器，**扫码登录淘宝**（登录态存在 `.playwright-profile/`，之后不用重复登录）。
+然后回到 PWA 的「数据」页，看到「本地抓取代理 · 已连接」，就可以在应用里直接抓了。
+
+代理默认监听 `http://localhost:7788`：
+
+```bash
+npm run agent -- --port=8888        # 换端口
+npm run agent -- --headless         # 无头模式（需先登录过）
+npm run agent -- --channel=chrome   # 用系统 Chrome，免下载 130MB 内核
+npm run agent -- --reset            # 清除登录态，重新扫码
+```
+
+**为什么部署在 Vercel 的 PWA 能连到本机？** HTTPS 页面访问 `http://localhost` 属于浏览器认可的
+「可信来源」，不会被 Mixed Content 拦截；代理也配好了 CORS 与 Private Network Access 响应头。
+打开 `http://localhost:7788/` 可以看到代理的状态页。
+
+抓取时通道优先级：**本地代理 → 线上接口 → 手动导入**。在「添加链接」弹层里会实时显示当前走哪条路。
+
+### 方式二：批量抓取脚本
+
+一次性抓很多链接时用命令行脚本，结果导出 JSON 再导入：
+
+```bash
 # 把商品链接写进 data/urls.txt，一行一个
 npm run scrape
 ```
 
-- 首次运行会打开浏览器，**扫码登录淘宝**，登录态保存在 `.playwright-profile/`，之后不用重复登录。
-- 脚本通过监听页面自身的 `mtop.taobao.detail.getdetail` 接口拿数据，并会主动补一次接口调用。
-- 结果写入 `data/scrape-result.json`，**支持增量合并**——反复运行只更新链接清单里的商品。
-- 抓完打开 PWA 的「数据」页 → 选择该 JSON 文件导入。
-
-常用参数：
+- 结果写入 `data/scrape-result.json`，**支持增量合并**——反复运行只更新清单里的商品。
+- 抓完在「数据」页选择该 JSON 文件导入。
 
 ```bash
-npm run scrape -- --headless              # 无头模式（需已登录过）
-npm run scrape -- --from-backup=data/备份.json   # 从备份里取链接，全量刷新
-npm run scrape -- --reset                 # 清除登录态，重新登录
+npm run scrape -- --headless                      # 无头模式（需已登录过）
+npm run scrape -- --from-backup=data/备份.json     # 从备份取链接，全量刷新
+npm run scrape -- --reset                         # 清除登录态
 npm run scrape -- --delay-min=3000 --delay-max=6000   # 放慢速度，降低风控概率
 ```
 
-### 方式二：应用内直接抓取
-
-在「看板 / 商品」页点「添加」，粘贴链接后勾选「自动抓取价格」。走的是 `/api/scrape`（服务端 mtop 签名请求）。
-能通就用，被风控拦截时会把商品保留为「待录入」，不会丢链接。
-
 ### 方式三：手动 / 表格导入
 
-「数据」页支持粘贴 CSV 或从 Excel 直接复制的表格，列名含「价格」即可，会自动识别 店铺 / 标题 / 规格 / 链接 / 原价 / 库存 等列：
+「数据」页支持粘贴 CSV 或从 Excel 直接复制的表格，列名含「价格」即可，会自动识别
+店铺 / 标题 / 规格 / 链接 / 原价 / 库存 等列：
 
 ```
 店铺,标题,规格,价格
 甲消防旗舰店,4KG手提式干粉灭火器,4KG 手提式,45.00
 ```
+
+> 应用内的 `/api/scrape` 会作为兜底通道自动尝试（服务端 mtop 签名）。被风控拦截时，
+> 商品会保留为「待录入」，不会丢链接。
 
 ---
 
@@ -141,7 +163,7 @@ src/
 │   └── api/
 │       ├── scrape/route.ts     # 服务端尽力抓取（mtop 签名）
 │       └── resolve/route.ts    # 短链解析
-├── components/                 # UI 组件（底部弹层、对比卡片、Toast…）
+├── components/                 # UI 组件（底部弹层、对比卡片、本地代理卡片、Toast…）
 └── lib/
     ├── types.ts                # 数据模型
     ├── db.ts                   # IndexedDB 数据层（Dexie）
@@ -149,10 +171,14 @@ src/
     ├── classify.ts             # 自动分类引擎 + 默认规则
     ├── compare.ts              # 跨店对比聚合
     ├── import.ts               # CSV / TSV / JSON 解析
-    ├── actions.ts              # 抓取与刷新动作
-    └── scrape/taobao-server.ts # 服务端 mtop 抓取实现
+    ├── local-agent.ts          # 本地抓取代理的探测与调用
+    ├── actions.ts              # 抓取与刷新动作（通道调度）
+    ├── use-live.ts             # Dexie liveQuery 订阅 hook
+    └── scrape/taobao-server.ts # 服务端 mtop 抓取实现（兜底通道）
 scripts/
-├── scrape-taobao.mjs           # 本地 Playwright 抓取脚本
+├── local-agent.mjs             # 本地抓取代理（PWA 直连，推荐）
+├── scrape-taobao.mjs           # 命令行批量抓取
+├── lib/taobao.mjs              # 抓取核心（上面两者共用）
 └── gen-icons.mjs               # 零依赖 PWA 图标生成器
 ```
 
@@ -164,7 +190,8 @@ scripts/
 npm run dev      # 开发
 npm run build    # 生产构建
 npm start        # 启动生产服务
-npm run scrape   # 本地抓取淘宝 SKU 价格
+npm run agent    # 启动本地抓取代理（日常抓取用这个）
+npm run scrape   # 命令行批量抓取淘宝 SKU 价格
 npm run icons    # 重新生成 PWA 图标
 ```
 
@@ -173,5 +200,6 @@ npm run icons    # 重新生成 PWA 图标
 ## 说明
 
 - 数据存在本机浏览器，**换设备或清理浏览器缓存前请先导出备份**（「数据」页 → 导出完整备份）。
+- 本地代理只监听 `127.0.0.1`，仅本机可访问，不会暴露到局域网。
 - 抓取请遵守目标网站的服务条款，仅用于自己店铺的竞品调研，控制请求频率。
 - 应用不采集、不上传任何数据。

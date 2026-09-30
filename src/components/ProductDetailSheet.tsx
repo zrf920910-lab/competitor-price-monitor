@@ -206,7 +206,7 @@ export function ProductDetailSheet({
           </Field>
 
           {product.status === 'error' && product.error ? (
-            <div className="rounded-xl bg-up/8 px-3 py-2.5 text-[11px] leading-5 text-up ring-1 ring-up/15">
+            <div className="rounded-xl bg-up/10 px-3 py-2.5 text-[11px] leading-5 text-up ring-1 ring-up/20">
               上次抓取失败：{product.error}
             </div>
           ) : null}

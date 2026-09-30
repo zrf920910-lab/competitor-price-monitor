@@ -39,7 +39,7 @@ export function Sheet({
   return (
     <div className="fixed inset-0 z-[90] flex items-end justify-center sm:items-center">
       <div
-        className="absolute inset-0 bg-ink-900/35 backdrop-blur-[2px]"
+        className="absolute inset-0 bg-ink-900/30 backdrop-blur-[2px]"
         onClick={onClose}
         aria-hidden
       />
@@ -100,7 +100,7 @@ export function ConfirmDialog({
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-[95] flex items-center justify-center px-6">
-      <div className="absolute inset-0 bg-ink-900/35 backdrop-blur-[2px]" onClick={onCancel} aria-hidden />
+      <div className="absolute inset-0 bg-ink-900/30 backdrop-blur-[2px]" onClick={onCancel} aria-hidden />
       <div className="sheet-panel relative w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl">
         <h3 className="text-[15px] font-semibold text-ink-900">{title}</h3>
         <div className="mt-2 text-[13px] leading-6 text-ink-600">{message}</div>
