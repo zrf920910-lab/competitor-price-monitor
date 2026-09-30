@@ -1,0 +1,33 @@
+{
+  "name": "competitor-price-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "竞品价格监控 PWA — 淘宝链接 SKU 价格抓取、自动分类、跨店横向对比",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "scrape": "node scripts/scrape-taobao.mjs",
+    "icons": "node scripts/gen-icons.mjs"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "dexie": "^4.0.11",
+    "next": "15.1.6",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  }
+}

@@ -1,0 +1,11 @@
+# 竞品价格监控 · 链接清单
+#
+# 把要监控的淘宝 / 天猫商品链接写在这里，一行一个。
+# 以 # 开头的行会被忽略。
+#
+# 然后运行：npm run scrape
+#
+# 示例：
+# https://item.taobao.com/item.htm?id=123456789012
+# https://detail.tmall.com/item.htm?id=987654321098
+# https://m.tb.cn/h.abcdefg
